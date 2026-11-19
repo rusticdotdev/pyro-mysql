@@ -1,4 +1,3 @@
-use chrono::{DateTime, Timelike, Utc};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDate, PyDateTime, PyTime};
 
@@ -39,19 +38,28 @@ pub fn date_from_ticks(py: Python, ticks: i64) -> PyResult<Bound<PyDate>> {
 #[pyfunction]
 #[pyo3(name = "TimeFromTicks")]
 pub fn time_from_ticks(py: Python, ticks: i64) -> PyResult<Bound<PyTime>> {
-    let dt = DateTime::from_timestamp(ticks, 0)
-        .ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid timestamp: {}", ticks))
-        })?
-        .with_timezone(&Utc);
-    PyTime::new(
-        py,
-        dt.hour() as u8,
-        dt.minute() as u8,
-        dt.second() as u8,
-        0,
-        None,
-    )
+    let (hour, minute, second) = utc_time_of_day(ticks).ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid timestamp: {}", ticks))
+    })?;
+    PyTime::new(py, hour, minute, second, 0, None)
+}
+
+/// Splits `ticks` (seconds since the Unix epoch) into the UTC hour, minute and second.
+///
+/// Returns `None` outside the years -262143..=262142. That range is inherited from the chrono
+/// implementation this replaced, so the same ticks keep raising `ValueError`.
+fn utc_time_of_day(ticks: i64) -> Option<(u8, u8, u8)> {
+    const MIN_TICKS: i64 = -8_334_601_228_800;
+    const MAX_TICKS: i64 = 8_210_266_876_799;
+    if !(MIN_TICKS..=MAX_TICKS).contains(&ticks) {
+        return None;
+    }
+    let second_of_day = ticks.rem_euclid(86_400);
+    Some((
+        (second_of_day / 3600) as u8,
+        (second_of_day / 60 % 60) as u8,
+        (second_of_day % 60) as u8,
+    ))
 }
 
 #[pyfunction]
@@ -67,4 +75,33 @@ pub fn binary(py: Python, x: &Bound<'_, PyAny>) -> PyResult<Py<PyBytes>> {
     let bytes_type = py.get_type::<PyBytes>();
     let result = bytes_type.call1((x,))?;
     Ok(result.extract::<Py<PyBytes>>()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::utc_time_of_day;
+
+    #[test]
+    fn utc_time_of_day_splits_ticks() {
+        assert_eq!(utc_time_of_day(0), Some((0, 0, 0)));
+        assert_eq!(utc_time_of_day(86_399), Some((23, 59, 59)));
+        assert_eq!(utc_time_of_day(86_400), Some((0, 0, 0)));
+        assert_eq!(utc_time_of_day(1_700_000_000), Some((22, 13, 20)));
+    }
+
+    #[test]
+    fn utc_time_of_day_wraps_backwards_before_the_epoch() {
+        assert_eq!(utc_time_of_day(-1), Some((23, 59, 59)));
+        assert_eq!(utc_time_of_day(-86_401), Some((23, 59, 59)));
+    }
+
+    #[test]
+    fn utc_time_of_day_rejects_ticks_outside_the_supported_years() {
+        assert_eq!(utc_time_of_day(-8_334_601_228_800), Some((0, 0, 0)));
+        assert_eq!(utc_time_of_day(8_210_266_876_799), Some((23, 59, 59)));
+        assert_eq!(utc_time_of_day(-8_334_601_228_801), None);
+        assert_eq!(utc_time_of_day(8_210_266_876_800), None);
+        assert_eq!(utc_time_of_day(i64::MIN), None);
+        assert_eq!(utc_time_of_day(i64::MAX), None);
+    }
 }
